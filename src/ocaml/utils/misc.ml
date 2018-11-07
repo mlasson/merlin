@@ -15,8 +15,6 @@
 
 open Std
 
-let () = Findlib.init ()
-
 (* Errors *)
 
 exception Fatal_error of string * Printexc.raw_backtrace
