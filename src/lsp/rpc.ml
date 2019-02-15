@@ -87,7 +87,6 @@ let read rpc =
   let open Utils.Result.Infix in
 
   let read_content rpc =
-    Thread.wait_read rpc.fd;
     let headers = Headers.read rpc.ic in
     match headers.content_length with
     | Some len ->
@@ -147,12 +146,109 @@ module Response = struct
     | Response_error v -> response_error_to_yojson v
 end
 
+module Inspector = struct
+
+  type item = {
+    type_: string [@key "type"];
+    message: Yojson.Safe.json;
+    timestamp: float;
+  } [@@deriving yojson]
+
+  type direction =
+    | Send
+    | Recv
+
+  type kind =
+    | Notification
+    | Request
+    | Response
+
+  let logger = ref None
+
+  let log (direction : direction) (f : direction -> _ -> item) x =
+    match !logger with
+    | None -> ()
+    | Some oc ->
+      let item = f direction x in
+      Yojson.Safe.to_channel ~std:false oc (item_to_yojson item);
+      Printf.fprintf oc "\n";
+      flush oc
+
+  let make direction kind message =
+    let type_ =
+       match direction, kind with
+       | Send, Notification -> "send-notification"
+       | Send, Request -> "send-request"
+       | Send, Response -> "send-response"
+       | Recv, Notification -> "recv-notification"
+       | Recv, Request -> "recv-request"
+       | Recv, Response -> "recv-response"
+    in
+    {
+      type_;
+      message;
+      timestamp = 1000.0 *. Unix.time ()
+    }
+
+  let packet direction ({Packet.id; _} as packet) =
+    let kind =
+      match id with
+      | None -> Notification
+      | Some _ -> Request
+    in
+    make direction kind (Packet.to_yojson packet)
+
+  let response direction response =
+    make direction Response (Response.to_yojson response)
+
+end
+
+let inspector_logger filename f () =
+  let t = !Inspector.logger in
+  match filename with
+  | None ->
+    begin
+      Inspector.logger := None;
+      try
+        let r = f () in
+        Inspector.logger := t;
+        r
+      with e ->
+        Inspector.logger := t;
+        raise e
+    end
+  | Some "-" ->
+    begin
+      let oc = stderr in
+      Inspector.logger := Some oc;
+      try
+        let r = f () in
+        Inspector.logger := t;
+        r
+      with e ->
+        Inspector.logger := t;
+        raise e
+    end
+  | Some filename ->
+    let oc = open_out_bin filename in
+    Inspector.logger := Some oc;
+    try
+      let r = f () in
+      Inspector.logger := t;
+      close_out oc;
+      r
+    with e ->
+      Inspector.logger := t;
+      close_out oc;
+      raise e
+
 let send_response rpc (response : Response.t) =
+  Inspector.log Recv Inspector.response response;
   let json = Response.to_yojson response in
   send rpc json
 
 module Server_notification = struct
-  open Protocol 
+  open Protocol
 
   type t =
     | PublishDiagnostics of PublishDiagnostics.params
@@ -168,8 +264,9 @@ end
 let send_notification rpc notif =
   let method_ = Server_notification.method_ notif in
   let params = Server_notification.params_to_yojson notif in
-  let response = `Assoc [("method", (`String method_)); ("params", params)] in
-  send rpc response
+  let packet = {Packet.id = None; method_; params} in
+  Inspector.log Recv Inspector.packet packet;
+  send rpc (Packet.to_yojson packet)
 
 module Client_notification = struct
   open Protocol

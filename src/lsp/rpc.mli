@@ -5,7 +5,7 @@
 module Server_notification : sig
   open Protocol
 
-  type t = 
+  type t =
     | PublishDiagnostics of PublishDiagnostics.publishDiagnosticsParams
 end
 
@@ -57,6 +57,7 @@ type 'state handler = {
     -> 'state
     -> Client_notification.t
     -> ('state, string) result
+
 }
 
 val start :
@@ -69,3 +70,5 @@ val start :
 val stop : t -> unit
 
 val send_notification : t -> Server_notification.t -> unit
+
+val inspector_logger: string option -> (unit -> 'a) -> unit -> 'a
