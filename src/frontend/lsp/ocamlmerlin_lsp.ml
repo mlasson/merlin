@@ -602,4 +602,10 @@ let () =
     | exception Not_found -> None
     | file -> Some file
   in
-  Logger.with_log_file ~sections:["ocamlmerlin-lsp"; "lsp";] log_file main
+  let inspector_file =
+    match Sys.getenv "MERLIN_LSP_LOG" with
+    | exception Not_found -> None
+    | file -> Some file
+  in
+  Logger.with_log_file ~sections:["ocamlmerlin-lsp"; "lsp";] log_file
+    (Lsp.Rpc.inspector_logger inspector_file main)
