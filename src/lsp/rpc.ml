@@ -16,11 +16,15 @@ let push {pendings; _} f =
 
 let {Logger. log} = Logger.for_section "lsp"
 
-let next {pendings; _} state = 
-  log ~title:"debug" "next: %d pendings" (Queue.length pendings);
+
+let cpt = ref 0 
+let next {pendings; _} state =
+  incr cpt; 
   match Queue.pop pendings with 
   | exception Queue.Empty -> Ok state
-  | f -> f state 
+  | f ->
+    log ~title:"debug" "next: %d pendings %d" (Queue.length pendings) !cpt; 
+    f state 
 
 let send rpc json =
   log ~title:"debug" "send: %a" (fun () -> Yojson.Safe.pretty_to_string ~std:false) json;
@@ -114,7 +118,7 @@ let read rpc =
     | None ->
       Error "missing Content-length header"
   in
-  let initial_timeout = 0.00001 in 
+  let initial_timeout = 1.00001 in 
   let timeout = ref initial_timeout in 
   let read_content rpc =
     match Unix.select [rpc.fd] [] [] !timeout with 
@@ -347,10 +351,7 @@ let start init_state handler ic oc =
   in
 
   let handle_message prev_state f =
-    let start = Unix.gettimeofday () in
     let next_state = f () in
-    let ellapsed = (Unix.gettimeofday () -. start) /. 1000.0 in
-    log ~title:"debug" "time ellapsed processing message: %fs" ellapsed;
     match next_state with
     | Ok next_state -> next_state
     | Error msg ->
