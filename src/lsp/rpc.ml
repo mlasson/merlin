@@ -1,14 +1,23 @@
-type t = {
+type 'state t = {
   ic : in_channel;
   oc : out_channel;
   fd : Unix.file_descr;
   mutable state : state;
+  pendings: ('state -> ('state, string) result) Queue.t
 }
 
 and state =
   | Ready
   | Initialized of Protocol.Initialize.client_capabilities
   | Closed
+
+let push {pendings; _} f = 
+  Queue.push pendings f
+
+let next {pendings; _} state = 
+  match Queue.pop pendings with 
+  | exception Queue.Empty -> None
+  | f -> Some (f state) 
 
 let {Logger. log} = Logger.for_section "lsp"
 
@@ -104,6 +113,17 @@ let read rpc =
     | None ->
       Error "missing Content-length header"
   in
+  let initial_timeout = 0.00001 in 
+  let timeout = ref initial_timeout in 
+  let read_content rpc =
+    if Thread.wait_timed_write rpc.fd !timeout then begin
+       timeout := initial_timeout;
+       Some (read_content rpc) 
+    end else begin 
+       timeout := 2.0 *. !timeout; 
+       None
+    end 
+  in 
 
   let parse_json content =
     match Yojson.Safe.from_string content with
@@ -113,8 +133,10 @@ let read rpc =
     | exception Yojson.Json_error msg ->
       errorf "error parsing json: %s" msg
   in
-
-  read_content rpc >>= parse_json >>= Packet.of_yojson
+  match read_content rpc with 
+  | None -> None
+  | Some (Error msg) -> Some (Error msg)
+  | Some (Ok content) -> Some (parse_json content >>= Packet.of_yojson)
 
 module Response = struct
   type response = {
@@ -227,6 +249,7 @@ module Message = struct
   open Protocol
 
   type t =
+    | Idle: t
     | Initialize : int * Protocol.Initialize.params -> t
     | Request : int * 'result Request.t -> t
     | Client_notification : Client_notification.t -> t
@@ -285,23 +308,23 @@ end
 
 type 'state handler = {
   on_initialize :
-    t
-    -> 'state
+    'state t
     -> Protocol.Initialize.params
+    -> 'state
     -> ('state * Protocol.Initialize.result, string) result;
 
   on_request :
     'res.
-    t
-    -> 'state
+    'state t
     -> Protocol.Initialize.client_capabilities
     -> 'res Request.t
+    -> 'state
     -> ('state * 'res, string) result;
 
   on_notification :
-    t
-    -> 'state
+    'state t
     -> Client_notification.t
+    -> 'state
     -> ('state, string) result
 }
 
@@ -309,8 +332,9 @@ let start init_state handler ic oc =
   let open Utils.Result.Infix in
 
   let read_message rpc =
-    read rpc >>= fun packet ->
-    Message.parse packet
+    match read rpc with 
+    | None -> Ok (Message.Idle)
+    | Some packet -> packet >>= Message.parse
   in
 
   let handle_message prev_state f =
@@ -332,8 +356,9 @@ let start init_state handler ic oc =
       let next_state =
         handle_message state (fun () ->
           read_message rpc >>= function
+          | Message.Idle -> Ok state
           | Message.Initialize (id, params) ->
-            handler.on_initialize rpc state params >>= fun (next_state, result) ->
+            handler.on_initialize rpc params state >>= fun (next_state, result) ->
             let json = Protocol.Initialize.result_to_yojson result in
             let response = Response.make id json in
             rpc.state <- Initialized params.client_capabilities;
@@ -360,15 +385,16 @@ let start init_state handler ic oc =
       let next_state =
         handle_message state (fun () ->
           read_message rpc >>= function
+          | Message.Idle -> Ok state
           | Message.Initialize _ ->
             errorf "received another initialize request"
           | Message.Client_notification (Exit as notif) ->
             rpc.state <- Closed;
-            handler.on_notification rpc state notif
+            handler.on_notification rpc notif state 
           | Message.Client_notification notif ->
-            handler.on_notification rpc state notif
+            handler.on_notification rpc notif state 
           | Message.Request (id, req) ->
-            handler.on_request rpc state client_capabilities req >>= fun (next_state, result) ->
+            handler.on_request rpc client_capabilities req state >>= fun (next_state, result) ->
             begin match Request.request_result_to_response id req result with
             | None ->
               Ok next_state
@@ -385,7 +411,7 @@ let start init_state handler ic oc =
   set_binary_mode_in ic true;
   set_binary_mode_out oc true;
   let fd = Unix.descr_of_in_channel stdin in
-  let rpc = { ic; oc; fd; state = Ready; } in
+  let rpc = { ic; oc; fd; state = Ready; pendings = (Queue.create ()) } in
   loop rpc init_state
 
-let stop (rpc : t) = rpc.state <- Closed
+let stop (rpc : _ t) = rpc.state <- Closed

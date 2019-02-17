@@ -35,27 +35,27 @@ module Request : sig
     | UnknownRequest : string * Yojson.Safe.json -> unit t
 end
 
-type t
+type 'state t
 
 type 'state handler = {
   on_initialize :
-    t
-    -> 'state
+    'state t
     -> Protocol.Initialize.params
+    -> 'state
     -> ('state * Protocol.Initialize.result, string) result;
 
   on_request :
     'res.
-    t
-    -> 'state
+    'state t
     -> Protocol.Initialize.client_capabilities
     -> 'res Request.t
+    -> 'state
     -> ('state * 'res, string) result;
 
   on_notification :
-    t
-    -> 'state
+    'state t
     -> Client_notification.t
+    -> 'state
     -> ('state, string) result
 }
 
@@ -66,6 +66,6 @@ val start :
   -> out_channel
   -> unit
 
-val stop : t -> unit
+val stop : 'a t -> unit
 
-val send_notification : t -> Server_notification.t -> unit
+val send_notification : 'a t -> Server_notification.t -> unit

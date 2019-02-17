@@ -175,17 +175,17 @@ let send_diagnostics rpc doc =
 
   Lsp.Rpc.send_notification rpc notif
 
-let on_initialize _rpc state _params =
+let on_initialize _rpc _params state =
   Ok (state, initializeInfo)
 
 let on_request :
   type resp .
-  Lsp.Rpc.t
-  -> Document_store.t
+  Document_store.t Lsp.Rpc.t
   -> Lsp.Protocol.Initialize.client_capabilities
   -> resp Lsp.Rpc.Request.t
+  -> Document_store.t
   -> (Document_store.t * resp, string) result
-  = fun _rpc store client_capabilities req ->
+  = fun _rpc client_capabilities req store ->
 
   let open Lsp.Utils.Result.Infix in
 
@@ -435,7 +435,7 @@ let on_request :
     return (store, resp)
   | Lsp.Rpc.Request.UnknownRequest _ -> errorf "got unknown request"
 
-let on_notification rpc store (notification : Lsp.Rpc.Client_notification.t) =
+let on_notification rpc (notification : Lsp.Rpc.Client_notification.t) store =
   let open Lsp.Utils.Result.Infix in
 
   match notification with
