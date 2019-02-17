@@ -68,4 +68,4 @@ val start :
 
 val stop : 'a t -> unit
 
-val send_notification : 'a t -> Server_notification.t -> unit
+val send_notification : 'a t -> ('a -> (Server_notification.t option, string) result) -> unit

@@ -12,14 +12,15 @@ and state =
   | Closed
 
 let push {pendings; _} f = 
-  Queue.push pendings f
-
-let next {pendings; _} state = 
-  match Queue.pop pendings with 
-  | exception Queue.Empty -> None
-  | f -> Some (f state) 
+  Queue.push f pendings
 
 let {Logger. log} = Logger.for_section "lsp"
+
+let next {pendings; _} state = 
+  log ~title:"debug" "next: %d pendings" (Queue.length pendings);
+  match Queue.pop pendings with 
+  | exception Queue.Empty -> Ok state
+  | f -> f state 
 
 let send rpc json =
   log ~title:"debug" "send: %a" (fun () -> Yojson.Safe.pretty_to_string ~std:false) json;
@@ -116,15 +117,14 @@ let read rpc =
   let initial_timeout = 0.00001 in 
   let timeout = ref initial_timeout in 
   let read_content rpc =
-    if Thread.wait_timed_write rpc.fd !timeout then begin
+    match Unix.select [rpc.fd] [] [] !timeout with 
+    | [ _ ], _, _ -> 
        timeout := initial_timeout;
        Some (read_content rpc) 
-    end else begin 
+    | _ ->
        timeout := 2.0 *. !timeout; 
        None
-    end 
   in 
-
   let parse_json content =
     match Yojson.Safe.from_string content with
     | json ->
@@ -187,11 +187,20 @@ module Server_notification = struct
 
 end
 
-let send_notification rpc notif =
-  let method_ = Server_notification.method_ notif in
-  let params = Server_notification.params_to_yojson notif in
-  let response = `Assoc [("method", (`String method_)); ("params", params)] in
-  send rpc response
+let send_notification rpc callback =
+  push rpc 
+    (fun state -> 
+      let open Utils.Result.Infix in
+      callback state >>= fun notif -> 
+        match notif with 
+        | None -> Ok state
+        | Some notif ->
+          let method_ = Server_notification.method_ notif in
+          let params = Server_notification.params_to_yojson notif in
+          let response = `Assoc [("method", (`String method_)); ("params", params)] in
+          send rpc response; 
+          Ok state
+    )
 
 module Client_notification = struct
   open Protocol
@@ -385,23 +394,29 @@ let start init_state handler ic oc =
       let next_state =
         handle_message state (fun () ->
           read_message rpc >>= function
-          | Message.Idle -> Ok state
+          | Message.Idle ->
+            next rpc state
           | Message.Initialize _ ->
             errorf "received another initialize request"
           | Message.Client_notification (Exit as notif) ->
             rpc.state <- Closed;
             handler.on_notification rpc notif state 
           | Message.Client_notification notif ->
-            handler.on_notification rpc notif state 
+            push rpc (handler.on_notification rpc notif); 
+            Ok state
           | Message.Request (id, req) ->
-            handler.on_request rpc client_capabilities req state >>= fun (next_state, result) ->
-            begin match Request.request_result_to_response id req result with
-            | None ->
-              Ok next_state
-            | Some response ->
-              send_response rpc response;
-              Ok next_state
-            end
+            push rpc 
+              (fun state -> 
+                handler.on_request rpc client_capabilities req state >>= fun (next_state, result) ->
+                begin match Request.request_result_to_response id req result with
+                | None ->
+                  Ok next_state
+                | Some response ->
+                  send_response rpc response;
+                  Ok next_state
+                end
+              );
+            Ok state
         )
       in
       Logger.log_flush ();
