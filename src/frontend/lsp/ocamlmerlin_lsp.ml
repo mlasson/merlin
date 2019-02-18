@@ -104,7 +104,8 @@ end = struct
   let update_text ?version change doc =
     let tdoc = Lsp.Text_document.apply_content_change ?version change doc.tdoc in
     let text = Lsp.Text_document.text tdoc in
-    log ~title:"debug" "TEXT\n%s" text;
+    if false then
+      log ~title:"debug" "TEXT\n%s" text;
     let source = lazy (Msource.make text) in
     let pipeline = lazy (
       let config = Lazy.force doc.config in
@@ -148,7 +149,9 @@ let position_of_lexical_position (lex_position : Lexing.position) =
   let character = lex_position.pos_cnum - lex_position.pos_bol in
   Lsp.Protocol.{line; character;}
 
-let send_diagnostics rpc doc =
+let diagnostics rpc uri store =
+  let open Lsp.Utils.Result.Infix in
+  Document_store.get store uri >>= fun doc ->
   let command = Query_protocol.Errors in
   let errors = Query_commands.dispatch (Document.pipeline doc) command in
   let diagnostics =
@@ -176,27 +179,44 @@ let send_diagnostics rpc doc =
       diagnostic
     ) errors
   in
+  Ok (Some (Lsp.Rpc.Server_notification.PublishDiagnostics {
+    uri = Document.uri doc;
+    diagnostics = diagnostics;
+  }))
 
-  let notif =
-    Lsp.Rpc.Server_notification.PublishDiagnostics {
-      uri = Document.uri doc;
-      diagnostics = diagnostics;
-    }
+let ongoing_diagnostics = Hashtbl.create 17
+
+let send_diagnostics rpc uri =
+  let open Lsp.Utils.Result.Infix in
+  let cancel = ref false in
+  let diagnostics rpc uri store =
+    if !cancel then begin
+      log ~title:"debug" "diagnostic cancelled";
+      Ok None
+    end else begin
+      Hashtbl.remove ongoing_diagnostics uri;
+      diagnostics rpc uri store
+    end
   in
+  begin match Hashtbl.find_opt ongoing_diagnostics uri with
+  | Some previous_cancel ->
+    previous_cancel := true;
+    Hashtbl.replace ongoing_diagnostics uri cancel;
+  | None -> Hashtbl.add ongoing_diagnostics uri cancel
+  end;
+  Lsp.Rpc.send_notification rpc (diagnostics rpc uri)
 
-  Lsp.Rpc.send_notification rpc notif
-
-let on_initialize _rpc state _params =
+let on_initialize _rpc _params state =
   Ok (state, initializeInfo)
 
 let on_request :
   type resp .
-  Lsp.Rpc.t
-  -> Document_store.t
+  Document_store.t Lsp.Rpc.t
   -> Lsp.Protocol.Initialize.client_capabilities
   -> resp Lsp.Rpc.Request.t
+  -> Document_store.t
   -> (Document_store.t * resp, string) result
-  = fun _rpc store client_capabilities req ->
+  = fun _rpc client_capabilities req store ->
 
   let open Lsp.Utils.Result.Infix in
 
@@ -541,7 +561,7 @@ let on_request :
     return (store, resp)
   | Lsp.Rpc.Request.UnknownRequest _ -> errorf "got unknown request"
 
-let on_notification rpc store (notification : Lsp.Rpc.Client_notification.t) =
+let on_notification rpc (notification : Lsp.Rpc.Client_notification.t) store =
   let open Lsp.Utils.Result.Infix in
 
   match notification with
@@ -550,14 +570,15 @@ let on_notification rpc store (notification : Lsp.Rpc.Client_notification.t) =
     let notifications = ref [] in
     Logger.with_notifications notifications @@ fun () ->
       File_id.with_cache @@ fun () ->
+        let uri = params.textDocument.uri in
         let doc =
           Document.make
-            ~uri:params.textDocument.uri
+            ~uri
             ~text:params.textDocument.text
             ()
         in
         Document_store.put store doc;
-        send_diagnostics rpc doc;
+        send_diagnostics rpc uri;
         Ok store
 
   | TextDocumentDidChange {textDocument = {uri; version;}; contentChanges;}  ->
@@ -567,14 +588,13 @@ let on_notification rpc store (notification : Lsp.Rpc.Client_notification.t) =
       List.fold_left f prev_doc contentChanges
     in
     Document_store.put store doc;
-    send_diagnostics rpc doc;
+    send_diagnostics rpc uri;
     Ok store
 
   | Initialized -> Ok store
   | Exit -> Ok store
 
   | UnknownNotification ("$/setTraceNotification", _) -> Ok store
-  | UnknownNotification ("$/cancelRequest", _) -> Ok store
 
   | UnknownNotification (id, json) ->
     log ~title:"warn" "unknown notification: %s %a"

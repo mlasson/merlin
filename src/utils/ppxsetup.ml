@@ -71,7 +71,7 @@ let command_line t =
         with Not_found -> []
       in
       let opts = List.concat (List.rev opts) in
-      String.concat ~sep:" " (ppx :: opts) :: ppxs)
+      String.concat ~sep:" " (Filename.quote ppx :: opts) :: ppxs)
     t.ppxs ~init:[]
 
 let dump t =
