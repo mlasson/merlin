@@ -97,7 +97,7 @@ module Packet = struct
   } [@@deriving yojson { strict = false }]
 end
 
-let read rpc =
+let read ~nonblock rpc =
   let open Utils.Result.Infix in
 
   let read_content rpc =
@@ -117,16 +117,11 @@ let read rpc =
     | None ->
       Error "missing Content-length header"
   in
-  let initial_timeout = 1.00001 in
-  let timeout = ref initial_timeout in
   let read_content rpc =
-    match Unix.select [rpc.fd] [] [] !timeout with
-    | [ _ ], _, _ ->
-       timeout := initial_timeout;
-       Some (read_content rpc)
-    | _ ->
-       timeout := 2.0 *. !timeout;
-       None
+    if Thread.wait_timed_read rpc.fd 0.0001 then
+      Some (read_content rpc)
+    else
+      None
   in
   let parse_json content =
     match Yojson.Safe.from_string content with
@@ -414,6 +409,10 @@ module Message = struct
         Ok (Client_notification (UnknownNotification (packet.method_, packet.params)))
       end
 
+    let parse packet =
+      Inspector.log Send Inspector.packet packet;
+      parse packet
+
 end
 
 type 'state handler = {
@@ -441,8 +440,8 @@ type 'state handler = {
 let start init_state handler ic oc =
   let open Utils.Result.Infix in
 
-  let read_message rpc =
-    match read rpc with
+  let read_message ~nonblock rpc =
+    match read ~nonblock rpc with
     | None -> Ok (Message.Idle)
     | Some packet -> packet >>= Message.parse
   in
@@ -462,7 +461,8 @@ let start init_state handler ic oc =
     | Ready ->
       let next_state =
         handle_message state (fun () ->
-          read_message rpc >>= function
+          let nonblock = not (Queue.is_empty rpc.pendings) in
+          read_message ~nonblock rpc >>= function
           | Message.Idle -> Ok state
           | Message.Initialize (id, params) ->
             handler.on_initialize rpc params state >>= fun (next_state, result) ->
@@ -491,7 +491,8 @@ let start init_state handler ic oc =
     | Initialized client_capabilities ->
       let next_state =
         handle_message state (fun () ->
-          read_message rpc >>= function
+          let nonblock = not (Queue.is_empty rpc.pendings) in
+          read_message ~nonblock rpc >>= function
           | Message.Idle ->
             next rpc state
           | Message.Initialize _ ->

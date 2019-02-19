@@ -174,21 +174,21 @@ let diagnostics rpc uri store =
 
 let ongoing_diagnostics = Hashtbl.create 17
 
-let send_diagnostics rpc uri = 
+let send_diagnostics rpc uri =
   let open Lsp.Utils.Result.Infix in
-  let cancel = ref false in 
+  let cancel = ref false in
   let diagnostics rpc uri store =
     if !cancel then Ok None else begin
-      Hashtbl.remove ongoing_diagnostics uri; 
+      Hashtbl.remove ongoing_diagnostics uri;
       diagnostics rpc uri store
     end
-  in 
+  in
   Lsp.Rpc.send_notification rpc (diagnostics rpc uri);
-  match Hashtbl.find_opt ongoing_diagnostics uri with 
+  match Hashtbl.find_opt ongoing_diagnostics uri with
   | Some previous_cancel ->
-    previous_cancel := true; 
-    Hashtbl.replace ongoing_diagnostics uri cancel; 
-  | None -> ()
+    previous_cancel := true;
+    Hashtbl.replace ongoing_diagnostics uri cancel;
+  | None -> Hashtbl.add ongoing_diagnostics uri cancel
 
 let on_initialize _rpc _params state =
   Ok (state, initializeInfo)
