@@ -29,7 +29,7 @@ let initializeInfo: Lsp.Protocol.Initialize.result = {
     documentFormattingProvider = false;
     documentRangeFormattingProvider = false;
     documentOnTypeFormattingProvider = None;
-    renameProvider = false;
+    renameProvider = true;
     documentLinkProvider = None;
     executeCommandProvider = None;
     typeCoverageProvider = false;
@@ -337,6 +337,27 @@ let on_request :
       {Lsp.Protocol.DocumentHighlight. kind = Some Text; range;}
      ) locs in
     return (store, lsp_locs)
+    
+  | Lsp.Rpc.Request.TextDocumentRename {textDocument = {uri;}; position; newName } ->
+    Document_store.get store uri >>= fun doc ->
+    let position = logical_of_position position in
+    let command = Query_protocol.Occurrences (`Ident_at position) in
+    begin match Query_commands.dispatch (Document.pipeline doc) command with
+    | [] -> return (store, None)
+    | occurrences ->
+      let edits =
+        List.map (fun (loc : Location.t) ->
+          let range : Lsp.Protocol.range =
+            {
+              start_ = position_of_lexical_position loc.loc_start;
+              end_ = position_of_lexical_position loc.loc_end
+            }
+          in
+          { Lsp.Protocol.TextEdit.range; newText = newName }
+         ) occurrences
+      in
+      return (store, Some {Lsp.Protocol.WorkspaceEdit.changes = Some [uri, edits]})
+    end
 
   | Lsp.Rpc.Request.DocumentSymbol {textDocument = {uri;}} ->
     Document_store.get store uri >>= fun doc ->

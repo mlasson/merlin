@@ -413,6 +413,65 @@ module Hover = struct
   }
 end
 
+module TextEdit = struct
+  type t = {
+    range: range;
+    newText: string;
+  }
+  [@@deriving yojson { strict = false }]
+end
+
+module WorkspaceEdit = struct
+
+  type edits = TextEdit.t list
+  [@@deriving yojson { strict = false }]
+
+  type changes =
+    (documentUri * edits) list
+
+  let map_error f l =
+    let open Utils.Result.Infix in
+    List.fold_left
+      (fun acc x ->
+        acc >>= fun acc ->
+          f x >>= fun y ->
+            return (y::acc)
+      ) (Ok []) l
+      >>= fun l -> return (List.rev l)
+
+  let changes_of_yojson : Yojson.Safe.t -> (changes, string) result = function
+    | `Assoc l ->
+      let open Utils.Result.Infix in
+      map_error (fun (name, json) ->
+        Uri.of_yojson (`String name) >>= fun uri ->
+        edits_of_yojson json >>= fun json ->
+        return (uri, json)) l
+    | _ -> Error "invalid changes"
+
+  let changes_to_yojson (l : changes) : Yojson.Safe.t =
+    `Assoc (List.map (fun (uri, edit) ->
+      match Uri.to_yojson uri with
+      | `String name -> name, edits_to_yojson edit
+      | _ -> assert false) l)
+
+  type t = {
+    changes: changes option;
+  }
+  [@@deriving yojson { strict = false }]
+
+end
+
+module Rename = struct
+  type params = {
+    textDocument: TextDocumentIdentifier.t;  (* the text document *)
+    position: position;  (* the position inside the text document *)
+    newName: string;
+  } [@@deriving yojson { strict = false }]
+
+  and result =
+    WorkspaceEdit.t option [@default None]
+end
+
 (* Initialize request, method="initialize" *)
 module Initialize = struct
 
