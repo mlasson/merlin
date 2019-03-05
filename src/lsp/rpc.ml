@@ -1,7 +1,7 @@
+
 type 'state t = {
-  ic : in_channel;
+  input : Messages.Reader.t;
   oc : out_channel;
-  fd : Unix.file_descr;
   mutable state : state;
   pending_actions: ('state -> ('state, string) result) Queue.t;
   pending_requests: (int, bool ref) Hashtbl.t;
@@ -16,7 +16,6 @@ let push {pending_actions; _} f =
   Queue.push f pending_actions
 
 let {Logger. log} = Logger.for_section "lsp"
-
 
 let cpt = ref 0
 let next {pending_actions; _} state =
@@ -40,59 +39,7 @@ let send rpc json =
   output_string rpc.oc data;
   flush rpc.oc;
   log ~title:"debug" "send: %a" (fun () json -> Yojson.Safe.to_string json) json;
-  Logger.log_flush ();
-
-
-module Headers = struct
-  type t = {
-    content_length: int option;
-  }
-
-  let initial = {
-    content_length = None;
-  }
-
-  let content_length = "Content-Length: "
-  let content_length_len = String.length content_length
-
-  let end_line = "\r\n"
-  let end_line_len = String.length end_line
-
-  let has_content_length s =
-    String.length s > content_length_len &&
-    String.equal (String.sub s 0 content_length_len) content_length
-
-  let parse_content_length line =
-    let v =
-      String.sub line
-        content_length_len
-        (String.length line - end_line_len - content_length_len)
-    in
-    int_of_string v
-
-  type state =
-    | Partial of t
-    | Done of t
-
-  let parse_line headers line =
-    if String.equal line "\r\n"
-    then Done headers
-    else
-      if has_content_length line
-      then
-        let content_length = parse_content_length line in
-        Partial {content_length = Some content_length;}
-      else Partial headers
-
-  let read ic =
-    let rec loop headers =
-      let line = input_line ic in
-      match parse_line headers (line ^ "\n") with
-      | Partial headers -> loop headers
-      | Done headers -> headers
-    in
-    loop initial
-end
+  Logger.log_flush ()
 
 module Packet = struct
   type t = {
@@ -102,36 +49,9 @@ module Packet = struct
   } [@@deriving yojson { strict = false }]
 end
 
-let read rpc =
+let rec read rpc =
+  let timeout = if Queue.length rpc.pending_actions = 0 then 0.001 else 0.0 in
   let open Utils.Result.Infix in
-
-  let read_content rpc =
-    log ~title:"debug" "start reading (pending: %d)..." (Queue.length rpc.pending_actions);
-    Logger.log_flush ();
-    let headers = Headers.read rpc.ic in
-    match headers.content_length with
-    | Some len ->
-      let buffer = Bytes.create len in
-      let rec read_loop read =
-        if read < len
-        then
-          let n = input rpc.ic buffer read (len - read) in
-          read_loop (read + n)
-        else ()
-      in
-      let () = read_loop 0 in
-      log ~title:"debug" "read message of length %d" (Bytes.length buffer);
-      Logger.log_flush ();
-      Ok (Bytes.to_string buffer)
-    | None ->
-      Error "missing Content-length header"
-  in
-  let read_content rpc =
-    if Queue.is_empty rpc.pending_actions || Thread.wait_timed_read rpc.fd 0.000001 then
-      Some (read_content rpc)
-    else
-      None
-  in
   let parse_json content =
     match Yojson.Safe.from_string content with
     | json ->
@@ -140,10 +60,10 @@ let read rpc =
     | exception Yojson.Json_error msg ->
       errorf "error parsing json: %s" msg
   in
-  match read_content rpc with
+  match Messages.Reader.read ~timeout rpc.input with
   | None -> None
-  | Some (Error msg) -> Some (Error msg)
-  | Some (Ok content) -> Some (parse_json content >>= Packet.of_yojson)
+  | Some content -> 
+    Some (parse_json content >>= Packet.of_yojson)
 
 module Response = struct
   type response = {
@@ -542,7 +462,6 @@ let start init_state handler ic oc =
         handle_message state (fun () ->
           read_message rpc >>= function
           | Message.Idle ->
-            log ~title:"debug" "idling ...";
             next rpc state
           | Message.Initialize _ ->
             errorf "received another initialize request"
@@ -587,8 +506,7 @@ let start init_state handler ic oc =
 
   set_binary_mode_in ic true;
   set_binary_mode_out oc true;
-  let fd = Unix.descr_of_in_channel stdin in
-  let rpc = { ic; oc; fd; state = Ready; pending_actions = (Queue.create ()); pending_requests = Hashtbl.create 17 } in
+  let rpc = { input = Messages.Reader.from_channel ic; oc; state = Ready; pending_actions = (Queue.create ()); pending_requests = Hashtbl.create 17 } in
   loop rpc init_state
 
 let stop (rpc : _ t) = rpc.state <- Closed
