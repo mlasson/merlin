@@ -1,10 +1,11 @@
 
 type 'state t = {
   input : Messages.Reader.t;
-  oc : out_channel;
+  output : Messages.Writer.t;
+ 
   mutable state : state;
-  pending_actions: ('state -> ('state, string) result) Queue.t;
-  pending_requests: (int, bool ref) Hashtbl.t;
+  pending_actions : ('state -> ('state, string) result) Queue.t;
+  pending_requests : (int, bool ref) Hashtbl.t;
 }
 
 and state =
@@ -30,14 +31,7 @@ let send rpc json =
   log ~title:"debug" "send: %a" (fun () json -> Yojson.Safe.to_string json) json;
   Logger.log_flush ();
   let data = Yojson.Safe.to_string json in
-  let length = String.length data in
-  let contentLengthString =
-    "Content-Length: " ^ string_of_int length ^ "\r\n"
-  in
-  output_string rpc.oc contentLengthString;
-  output_string rpc.oc "\r\n";
-  output_string rpc.oc data;
-  flush rpc.oc;
+  Messages.Writer.write rpc.output data; 
   log ~title:"debug" "send: %a" (fun () json -> Yojson.Safe.to_string json) json;
   Logger.log_flush ()
 
@@ -425,9 +419,11 @@ let start init_state handler ic oc =
   in
 
   let rec loop rpc state =
+    while not @@ Messages.Writer.flush ~timeout:0.0 rpc.output do () done;
     match rpc.state with
     | Closed -> ()
     | Ready ->
+      
       let next_state =
         handle_message state (fun () ->
           read_message rpc >>= function
@@ -506,7 +502,7 @@ let start init_state handler ic oc =
 
   set_binary_mode_in ic true;
   set_binary_mode_out oc true;
-  let rpc = { input = Messages.Reader.from_channel ic; oc; state = Ready; pending_actions = (Queue.create ()); pending_requests = Hashtbl.create 17 } in
+  let rpc = { input = Messages.Reader.from_channel ic; output = Messages.Writer.from_channel oc; state = Ready; pending_actions = (Queue.create ()); pending_requests = Hashtbl.create 17 } in
   loop rpc init_state
 
 let stop (rpc : _ t) = rpc.state <- Closed

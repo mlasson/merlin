@@ -24,7 +24,7 @@ module AsyncInput = struct
         first := 0;
       end
     in
-    let rec loop ~timeout until =
+    let rec unsafe_read_until ~timeout until =
       let open Unix in
       match until !buffer !first !checked !last with
       | -1 ->
@@ -38,7 +38,7 @@ module AsyncInput = struct
           if read_len = 0 then
             raise (ConnectionLost "End of file")
           else
-            loop ~timeout until
+            unsafe_read_until ~timeout until
         | _ -> None
         end
       | shift ->
@@ -47,14 +47,14 @@ module AsyncInput = struct
         checked := shift;
         Some result
     in
-    let safe ~timeout until =
+    let safe_read_until ~timeout until =
       try
-        loop ~timeout until
+        unsafe_read_until ~timeout until
       with Unix.Unix_error (err,_, _) -> 
         raise (ConnectionLost (Unix.error_message err))
     in
     let read_line ~timeout =
-      safe ~timeout (fun buffer _ from last ->
+      safe_read_until ~timeout (fun buffer _ from last ->
         let k = ref from in
         while !k < last && Bytes.get buffer !k <> '\n' do
           incr k
@@ -63,7 +63,7 @@ module AsyncInput = struct
       )
     in
     let read ~timeout k =
-      safe ~timeout (fun _ first _ last -> if last - first >= k then first + k else -1)
+      safe_read_until ~timeout (fun _ first _ last -> if last - first >= k then first + k else -1)
     in
     {
       read;
@@ -171,6 +171,91 @@ module Reader = struct
         | None -> None
         | Some content ->
           reader.state <- Partial [];
-          Some content   
-          
+          Some content             
+
+end
+
+module AsyncOutput = struct
+
+  type t =
+    {
+      write: string -> unit;
+      flush: timeout:float -> bool;
+    }
+
+  let rec double_length length n =
+    if n < length then 
+      length 
+    else 
+      double_length (2 * length) n 
+
+  let from_channel oc =
+    let first = ref 0 in
+    let last = ref 0 in
+    let buffer = ref (Bytes.make 1024 '\x00') in
+    let fd = Unix.descr_of_out_channel oc in
+    let write content =
+      let content_len = String.length content in 
+      let buffer_len = Bytes.length !buffer in
+      let needed_space = !last + content_len - buffer_len in
+      if needed_space > 0 then begin
+        let new_space = 
+          if 2 * needed_space < !first then 
+            !first
+          else
+            !first + double_length buffer_len (needed_space - !first) 
+        in
+        buffer := Bytes.extend !buffer (- !first) new_space;
+        last := !last - !first;
+        first := 0;
+      end;
+      Bytes.blit_string content 0 !buffer !last content_len;
+      last := !last + content_len
+    in
+    let rec unsafe_flush ~timeout =
+      let open Unix in
+      if !first < !last then begin
+        match select [] [fd] [] timeout with
+        | [], [ _ ], [] ->
+          let write_len = Unix.write fd !buffer !first (!last - !first) in
+          first := !first + write_len;
+          if write_len = 0 then
+            raise (ConnectionLost "End of file")
+          else
+            unsafe_flush ~timeout
+        | _ -> false
+      end else 
+        true
+    in
+    let flush ~timeout = 
+      try
+        unsafe_flush ~timeout
+      with Unix.Unix_error (err,_, _) -> 
+        raise (ConnectionLost (Unix.error_message err))
+    in 
+    {
+      write;
+      flush;
+    }
+
+end
+
+module Writer = struct
+  type t = {
+    output: AsyncOutput.t; 
+  }
+
+  let from_channel oc = { output = AsyncOutput.from_channel oc }
+
+  let write {output} data =
+    let open AsyncOutput in
+    let length = String.length data in
+    output.write "Content-Length: "; 
+    output.write (string_of_int length);
+    output.write "\r\n\r\n";
+    output.write data
+
+  let flush ~timeout {output} =
+    output.flush ~timeout
+     
 end
